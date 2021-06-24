@@ -20,6 +20,7 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
     def __init__(self, cfg, target,
                  pyocd='pyocd',
                  flash_addr=0x0, erase=False, flash_opts=None,
+                 flash_format=None,
                  gdb_port=DEFAULT_PYOCD_GDB_PORT,
                  telnet_port=DEFAULT_PYOCD_TELNET_PORT, tui=False,
                  pyocd_config=None,
@@ -38,14 +39,16 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
         ''' most debuggers are not accessible directly in WSL, but '''
         ''' the pyOCD server is still accessible to gdb inside WSL '''
         self.pyocd = [wsl_path, '-m', pyocd] if wsl_path is not None else [pyocd]
+        self.wsl_path = wsl_path
         self.flash_addr_args = ['-a', hex(flash_addr)] if flash_addr else []
         self.erase = erase
+        self.flash_format = flash_format
         self.gdb_cmd = [cfg.gdb] if cfg.gdb is not None else None
         self.gdb_port = gdb_port
         self.telnet_port = telnet_port
         self.tui_args = ['-tui'] if tui else []
         self.hex_name = cfg.hex_file
-        self.bin_name = cfg.bin_file
+        self.bin_name = cfg.bin_file 
         self.elf_name = cfg.elf_file
 
         pyocd_config_args = []
@@ -98,6 +101,9 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
         parser.add_argument('--flash-opt', default=[], action='append',
                             help='''Additional options for pyocd flash,
                             e.g. --flash-opt="-e=chip" to chip erase''')
+        parser.add_argument('--flash-format', 
+                            help='''flash image format bin/hex/elf,
+                            default will use elf by extension''')
         parser.add_argument('--frequency',
                             help='SWD clock frequency in Hz')
         parser.add_argument('--gdb-port', default=DEFAULT_PYOCD_GDB_PORT,
@@ -125,6 +131,7 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
             cfg, args.target,
             pyocd=args.pyocd,
             flash_addr=flash_addr, erase=args.erase, flash_opts=args.flash_opt,
+            flash_format=args.flash_format,
             gdb_port=args.gdb_port, telnet_port=args.telnet_port, tui=args.tui,
             board_id=args.board_id, daparg=args.daparg,
             frequency=args.frequency,
@@ -149,18 +156,27 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
             self.debug_debugserver(command, **kwargs)
 
     def flash(self, **kwargs):
-        if self.hex_name is not None and os.path.isfile(self.hex_name):
+        fformat_args = []    
+        if self.flash_format == 'hex':
             fname = self.hex_name
-        elif self.bin_name is not None and os.path.isfile(self.bin_name):
-            self.logger.warning(
-                'hex file ({}) does not exist; falling back on .bin ({}). '.
-                format(self.hex_name, self.bin_name) +
-                'Consider enabling CONFIG_BUILD_OUTPUT_HEX.')
+            fformat_args = ['--format', 'hex']
+        elif self.flash_format == 'bin':
             fname = self.bin_name
+            fformat_args = ['--format', 'bin']
+        elif self.flash_format == 'elf':
+            fname = self.elf_name
+            fformat_args = ['--format', 'elf']
         else:
+            fname = self.elf_name
+        if not os.path.isfile(fname):
             raise ValueError(
-                'Cannot flash; no hex ({}) or bin ({}) files found. '.format(
-                    self.hex_name, self.bin_name))
+                'Cannot flash; ({}) file not found. '.format(fname))
+        ''' If running in WSL, the path needs to be a windows path '''
+        ''' Convert to relative path first so the drive mount point '''
+        ''' does not need to be converted '''
+        if self.wsl_path is not None: 
+            fname = os.path.relpath(fname)
+            fname = fname.replace('/', '\\')
 
         erase_method = 'chip' if self.erase else 'sector'
 
@@ -168,6 +184,7 @@ class PyOcdBinaryRunner(ZephyrBinaryRunner):
                ['flash'] +
                self.pyocd_config_args +
                ['-e', erase_method] +
+               fformat_args +
                self.flash_addr_args +
                self.daparg_args +
                self.target_args +
